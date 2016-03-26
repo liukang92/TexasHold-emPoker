@@ -1,0 +1,686 @@
+#include "game.h"
+
+
+FILE *file;
+char *serverIp, *clientIp;
+unsigned int serverPort, clientPort, pid;
+int mySocket;
+
+char protocolBegin[10][20] = {"seat/ \n", "blind/ \n", "hold/ \n", "inquire/ \n", "flop/ \n", "turn/ \n", "river/ \n", "showdown/ \n", "pot-win/ \n", "notify/ \n"};
+char protocolEnd[10][20] =   {"/seat \n", "/blind \n", "/hold \n", "/inquire \n", "/flop \n", "/turn \n", "/river \n", "/showdown \n", "/pot-win \n", "/notify \n"};
+int protocolNum = 10;
+char totalBuf[BUFFER_LENGTH];
+int totalBufLen = 0;
+char tmpInfo[BUFFER_LENGTH] = {0};// tmp storage of info
+
+publicInfo pubInfo;
+privateInfo myInfo;
+
+/*
+	split info by line
+	return by line and line number
+*/
+void splitInfoByDelim(char *buf, char *delim, char *p[], int *num){
+	int pIndex=0;
+    do{
+    	if(0 == pIndex){
+    		p[pIndex] = strtok(buf, delim);
+    	}else{
+    		p[pIndex] = strtok(NULL, delim);
+    	}
+    	pIndex ++;
+    } while(NULL != p[pIndex-1]);
+    *num = pIndex-1;
+}	
+
+/*
+	split seat info
+*/
+void splitSeatInfo(char *buf){
+	int qNum, i;
+	for(i=0; i<8; i++){
+		memset(&pubInfo.seatInfo[i], 0, sizeof(seat));
+	}
+	char *p[10], *q[10];
+	splitInfoByDelim(buf, "\n", p, &pubInfo.totalSeatNum);
+	
+    for(i=0; i<pubInfo.totalSeatNum; i++){
+		splitInfoByDelim(p[i], " ", q, &qNum);
+		if(0 == i){
+			pubInfo.seatInfo[i].pid = atoi(q[1]);
+			pubInfo.seatInfo[i].jetton = atoi(q[2]);
+			pubInfo.seatInfo[i].money = atoi(q[3]);
+		}else if(i <= 2){
+			pubInfo.seatInfo[i].pid = atoi(q[2]);
+			pubInfo.seatInfo[i].jetton = atoi(q[3]);
+			pubInfo.seatInfo[i].money = atoi(q[4]);
+		}else{
+			pubInfo.seatInfo[i].pid = atoi(q[0]);
+			pubInfo.seatInfo[i].jetton = atoi(q[1]);
+			pubInfo.seatInfo[i].money = atoi(q[2]);
+		}
+		
+    }
+    for(i=0; i<pubInfo.totalSeatNum; i++){
+    	if(pubInfo.seatInfo[i].pid == pid){
+    		myInfo.mySeat = i;
+    		myInfo.myJetton = pubInfo.seatInfo[i].jetton;
+    		myInfo.myMoney = pubInfo.seatInfo[i].money;
+    		break;
+    	}
+	}
+	return ;
+}
+/*
+	split blind info
+*/
+void splitBlindInfo(char *buf, int *sb, int *bb){
+	char *p[10], *q[10];
+	int i, num, qNum;
+	splitInfoByDelim(buf, "\n", p, &num);
+    for(i=0; i<num; i++){
+    	splitInfoByDelim(p[i], " ", q, &qNum);
+	    if(0 == i){
+	    	*sb = atoi(q[1]);
+	    }else{
+	    	*bb = atoi(q[1]);
+	    }
+    }
+	return ;
+}
+/*
+	convert color to int
+	1:SPADES 2:HEARTS 3:CLUBS 4:DIAMONDS
+*/
+int color2int(char *color){
+	int c;
+	if(0 == strcmp(color, "SPADES")) c = COLOR_SPADES;
+	if(0 == strcmp(color, "HEARTS")) c = COLOR_HEARTS;
+	if(0 == strcmp(color, "CLUBS")) c = COLOR_CLUBS;
+	if(0 == strcmp(color, "DIAMONDS")) c = COLOR_DIAMONDS;
+	return c;
+}
+/*
+	convert action to int
+	0:blind 1:check 2:call 3:raise 4:all_in 5:fold
+*/
+int action2int(char *action){
+	int a;
+	if(0 == strcmp(action, "blind")) a = ACTION_BLIND;
+	if(0 == strcmp(action, "check")) a = ACTION_CHECK;
+	if(0 == strcmp(action, "call")) a = ACTION_CALL;
+	if(0 == strcmp(action, "raise")) a = ACTION_RAISE;
+	if(0 == strcmp(action, "all_in")) a = ACTION_ALLIN;
+	if(0 == strcmp(action, "fold")) a = ACTION_FOLD;
+	return a;
+}
+/*
+	convert point to int
+	1-13 => A/2/3/4/5/6/7/8/9/10/J/Q/K
+*/
+int point2int(char *point){
+	int p=-1;
+	unsigned char c = point[0];
+	switch(c){
+		case 'A': p = 1; break;
+		case '2': case '3': case '4': case '5':
+		case '6': case '7': case '8': case '9':
+			p = c-'1'+1;
+			break;	
+		case 'J': p = 11; break;
+		case 'Q': p = 12; break;
+		case 'K': p = 13; break;
+		default: 
+			break;
+	}
+	// compare if "10"
+	if(0 == strcmp(point, "10")) p = 10;
+	return p;
+}
+/*
+	split hand card info
+*/
+void splitHandCardInfo(char *buf, card *hc){
+	char *p[10], *q[10];
+	int i, num, qNum;
+	splitInfoByDelim(buf, "\n", p, &num);
+    for(i=0; i<num; i++){
+    	splitInfoByDelim(p[i], " ", q, &qNum);
+	    (hc[i]).color = color2int(q[0]);
+	    (hc[i]).point = point2int(q[1]);
+    }
+	return ;
+}
+/*
+	split inquire info
+*/
+void splitInquireInfo(char *buf, inquireInfo *inq){
+	int i, num, qNum, j;
+	for(i=0; i<8; i++){
+		memset(&pubInfo.inquire[i], 0, sizeof(inquireInfo));
+	}
+	char *p[10], *q[10];
+	
+	splitInfoByDelim(buf, "\n", p, &num);
+	pubInfo.nowCallPot = 0;
+	int foldNum=0, myBet=0;
+    for(i=0; i<num; i++){
+    	splitInfoByDelim(p[i], " ", q, &qNum);
+	    if((num-1) == i){// total pot
+	    	pubInfo.lastTotalPot = pubInfo.totalPot;
+	    	pubInfo.totalPot = atoi(q[2]);
+	    }else{
+	    	// pid jetton money bet action 
+	    	inq[i].pid = atoi(q[0]);
+	    	inq[i].jetton = atoi(q[1]);
+	    	inq[i].money = atoi(q[2]);
+	    	inq[i].bet = atoi(q[3]);
+	    	inq[i].action = action2int(q[4]); 
+	    	pubInfo.nowCallPot = inq[i].bet>pubInfo.nowCallPot? inq[i].bet: pubInfo.nowCallPot;
+	    	if(inq[i].pid == pid){
+	    		myBet = inq[i].bet;
+	    		myInfo.myJetton = inq[i].jetton;
+	    		myInfo.myMoney = inq[i].money;
+	    	}
+	    	int isSame = 0;
+	    	if(ACTION_FOLD == inq[i].action){
+	    		foldNum ++;
+	    		for(j=0; j<8; j++){
+					if(pubInfo.foldPlayer[j] == inq[i].pid){
+						isSame = 1;
+						break;
+					}
+				}
+				if(!isSame){
+	    			pubInfo.foldPlayer[pubInfo.foldPlayerNum] = inq[i].pid;
+					pubInfo.foldPlayerNum ++;			
+				}
+	    	}
+	    }
+    }
+    pubInfo.nowCallPot -= myBet;
+    pubInfo.curPlayerNum = num - 1 - foldNum;
+    if(2 == pubInfo.totalSeatNum) pubInfo.curPlayerNum = 2;
+    
+    if(pubInfo.nowCallPot > myInfo.myJetton){// need allin
+		pubInfo.nowCallPot = myInfo.myJetton;
+		pubInfo.totalPot = pubInfo.lastTotalPot + (pubInfo.curPlayerNum-1)*myInfo.myJetton;
+		fprintf(file, "need allin, last total pot:%d side pot:%d\n", pubInfo.lastTotalPot, pubInfo.totalPot);
+	}
+
+	if(PRGS_PREFLOP == pubInfo.progress) pubInfo.preFlopRoundNum ++;
+    if(PRGS_FLOP == pubInfo.progress) pubInfo.flopRoundNum ++;
+    if(PRGS_TURN == pubInfo.progress) pubInfo.turnRoundNum ++;
+    if(PRGS_RIVER == pubInfo.progress) pubInfo.riverRoundNum ++;
+	
+	return ;
+}
+/*
+	split public card info
+	flag: flop | turn | river
+*/
+void splitPublicCardInfo(char *buf, card *pc, char *flag){
+	char *p[10], *q[10];
+	int i, num, qNum, j, index;
+	splitInfoByDelim(buf, "\n", p, &num);
+    for(i=0; i<num; i++){
+    	splitInfoByDelim(p[i], " ", q, &qNum);
+    	if('f' == flag[0]) j = i; // flop
+    	if('t' == flag[0]) j = i+3; // turn
+    	if('r' == flag[0]) j = i+4;  // river
+	    (pc[j]).color = color2int(q[0]);
+	    (pc[j]).point = point2int(q[1]);
+    }
+	return ;
+}
+/*
+	show down info
+*/
+void splitShowDownInfo(char *buf){
+	char *p[20], *q[10];
+	int i, num, qNum, j;
+	splitInfoByDelim(buf, "\n", p, &num);
+	// ignore common card info
+    for(i=7; i<num; i++){
+    	splitInfoByDelim(p[i], " ", q, &qNum);
+    }
+	return ;
+}
+
+/*
+	pot win info
+*/
+void splitPotWinInfo(char *buf){
+	char *p[10], *q[10];
+	int i, num, qNum, j;
+	splitInfoByDelim(buf, "\n", p, &num);
+	fprintf(file, "pot win:\n");
+    for(i=0; i<num; i++){
+    	splitInfoByDelim(p[i], " ", q, &qNum);
+    	fprintf(file, "pid: %s number: %s\n", q[0], q[1]);
+    }
+	return ;
+}
+
+/*
+	convert int to color ♠♣♥♦
+*/
+void int2color(int i, char *c){
+	switch(i){
+		case 1:
+			sprintf(c, "♠");
+			break;
+		case 2:
+			sprintf(c, "♥");
+			break;
+		case 3:
+			sprintf(c, "♣");
+			break;
+		case 4:
+			sprintf(c, "♦");
+			break;
+		default:
+			break;
+	}
+}
+/*
+	convert int to point
+*/
+void int2point(int i, char *p){
+	switch(i){
+		case 1:
+			sprintf(p, "A");
+			break;
+		case 2:case 3:case 4:case 5:case 6:case 7:case 8:case 9:case 10:
+			sprintf(p, "%d", i);
+			break;
+		case 11:
+			sprintf(p, "J");
+			break;
+		case 12:
+			sprintf(p, "Q");
+			break;
+		case 13:
+			sprintf(p, "K");
+			break;
+		default:
+			break;
+	}
+}
+
+/*
+	stack warn
+*/
+int stackWarn(double winPercent){
+	//stack protection
+	int stack = myInfo.myJetton - pubInfo.nowCallPot;
+	int stackWarning;
+	// fprintf(file, "money %d curpn %d winp %f\n", myInfo.myMoney, pubInfo.curPlayerNum, winPercent);
+	if(0 == myInfo.myMoney){
+		if(2 == pubInfo.curPlayerNum){
+			stackWarning = stack<10*pubInfo.bigBlind && winPercent<0.65;
+		}else{
+			stackWarning = stack<10*pubInfo.bigBlind && winPercent<0.5;
+		}
+	}else{
+		if(2 == pubInfo.curPlayerNum){
+			stackWarning = stack<4*pubInfo.bigBlind && myInfo.myJetton>8*pubInfo.bigBlind && winPercent<0.65;
+		}else{
+			stackWarning = stack<4*pubInfo.bigBlind && myInfo.myJetton>8*pubInfo.bigBlind && winPercent<0.5;
+		}
+	}
+
+	return stackWarning;
+}
+/*
+	act by rr
+*/
+int getActionByRR(double rr){
+	int act;
+	int rdm = rand() % (100 + 1 - 1) + 1;
+	if(rr < 0.8){
+		if(rdm <= 95){
+			act = ACTION_FOLD;
+		}else if(rdm <= 100){
+			act = ACTION_RAISE;
+		}
+	}else if(rr < 1.0){
+		if(rdm <= 80){
+			act = ACTION_FOLD;
+		}else if(rdm <= 85){
+			act = ACTION_CALL;
+		}else if(rdm <= 100){
+			act = ACTION_RAISE;
+		}
+	}else if(rr < 1.3){
+		if(rdm <= 60){
+			act = ACTION_CALL;
+		}else if(rdm <= 100){
+			act = ACTION_RAISE;
+		}
+	}else if(rr >= 1.3){
+		if(rdm <= 30){
+			act = ACTION_CALL;
+		}else if(rdm <= 100){
+			act = ACTION_RAISE;
+		}
+	}
+	return act;
+}
+
+/*
+	take action
+*/
+void takeAction(){
+	fprintf(file, "total player: %d fold player: %d cur player: %d\n", pubInfo.totalSeatNum, pubInfo.foldPlayerNum, pubInfo.curPlayerNum);
+	int raiseNum;
+	char action[20];
+	int act;
+	act = rand() % (100) + 1;
+	if(act <= 5){
+		act = ACTION_ALLIN;
+	}else if(act <= 30){
+		act = ACTION_RAISE;
+	}else if(act <= 80){
+		act = ACTION_CALL;
+	}else if(act <= 100){
+		act = ACTION_FOLD;
+	}
+
+	switch(act){
+		case ACTION_FOLD:
+			pubInfo.progress = PRGS_FOLD; //fold
+			sprintf(action, "fold \n");
+			break;
+		case ACTION_CALL:
+			sprintf(action, "call \n");
+			break;
+		case ACTION_CHECK:
+			sprintf(action, "check \n");
+			break;
+		case ACTION_RAISE:
+			raiseNum = pubInfo.bigBlind;
+			sprintf(action, "raise %d \n", raiseNum);
+			break;
+		case ACTION_ALLIN:
+			pubInfo.progress = PRGS_ALLIN; //all in
+			sprintf(action, "all_in \n");
+			break;
+		default:
+			sprintf(action, "fold \n");
+			break;
+	}
+	int sendSize = send(mySocket, action, strlen(action), 0);
+	fprintf(file, "action: %s\n", action);
+	return;
+}
+/*
+	print color and point
+*/
+void printCard(char *flag){
+	char s1[3], s2[3], s3[3], s4[3];
+	int i;
+	if(flag[0] == 'h'){
+		fprintf(file, "hand card : (");
+		for(i=0; i<2; i++){
+			int2color(myInfo.handCard[i].color, s1);
+			int2point(myInfo.handCard[i].point, s2);
+			fprintf(file, "%s%s ", s1, s2);			
+		}
+
+	}else if(flag[0] == 'f'){
+		fprintf(file, "flop : (");
+		for(i=0; i<3; i++){
+			int2color(pubInfo.publicCard[i].color, s1);
+			int2point(pubInfo.publicCard[i].point, s2);
+			fprintf(file, "%s%s ", s1, s2);			
+		}
+
+	}else if(flag[0] == 't'){
+		fprintf(file, "turn: (");
+		for(i=3; i<4; i++){
+			int2color(pubInfo.publicCard[i].color, s1);
+			int2point(pubInfo.publicCard[i].point, s2);
+			fprintf(file, "%s%s ", s1, s2);			
+		}
+
+	}else if(flag[0] == 'r'){
+		fprintf(file, "river : (");
+		for(i=4; i<5; i++){
+			int2color(pubInfo.publicCard[i].color, s1);
+			int2point(pubInfo.publicCard[i].point, s2);
+			fprintf(file, "%s%s ", s1, s2);			
+		}
+
+	}
+	fprintf(file, ")\n");
+	
+}
+/*
+	init parameters before one hand
+*/
+void initEveryHandParams(){
+	int i;
+	pubInfo.foldPlayerNum = 0;
+	for(i=0; i<8; i++){
+		pubInfo.foldPlayer[i] = 0;
+	}
+	myInfo.myJetton = 0;
+	myInfo.myMoney = 0;
+	pubInfo.preFlopRoundNum = pubInfo.flopRoundNum = pubInfo.turnRoundNum = pubInfo.riverRoundNum = 0;
+	pubInfo.handNum ++;
+}
+/*
+	handle info
+*/
+void handleInfo(int type){
+	// clock_t start, finish;
+	// double duration;
+	// fprintf(file, "handle info type: %d\n", type);
+	switch(type){
+		case 0: // seat info
+			initEveryHandParams();
+			splitSeatInfo(tmpInfo);
+			fprintf(file, "-----------------hand %d------------------\n\n", pubInfo.handNum);
+			fprintf(file, "my seat: %d \n", myInfo.mySeat);
+			break;
+		case 1: // blind info
+			splitBlindInfo(tmpInfo, &(pubInfo.smallBlind), &(pubInfo.bigBlind));
+			break;
+		case 2: // hand card
+			splitHandCardInfo(tmpInfo, myInfo.handCard);
+			printCard("handcard");
+			pubInfo.progress = PRGS_PREFLOP; //pre flop
+			break;
+		case 3: // inqure and take action !!!!
+			// start = clock();
+			splitInquireInfo(tmpInfo, pubInfo.inquire);
+			takeAction();
+			// finish = clock();
+			// duration = (double)(finish - start) / CLOCKS_PER_SEC;
+			// fprintf(file, "take action use %f ms\n", duration*1000);
+			break;
+		case 4: // flop
+			splitPublicCardInfo(tmpInfo, pubInfo.publicCard, "flop");
+			printCard("flop");
+			pubInfo.progress = PRGS_FLOP; // flop
+			break;
+		case 5: // turn
+			splitPublicCardInfo(tmpInfo, pubInfo.publicCard, "turn");
+			printCard("turn");
+			pubInfo.progress = PRGS_TURN; //turn
+			break;
+		case 6: // river
+			splitPublicCardInfo(tmpInfo, pubInfo.publicCard, "river");
+			printCard("river");
+			pubInfo.progress = PRGS_RIVER; //river
+			break;
+		case 7: //show down info
+			splitShowDownInfo(tmpInfo);
+			break;
+		case 8: // pot win
+			splitPotWinInfo(tmpInfo);
+			break;
+		case 9: // notify
+			//splitInquireInfo(tmpInfo, pubInfo.notify);
+			break;
+		default:
+			break;
+	}
+	return ;
+}
+
+/*
+	read info from buffer received from server
+	wrapped by protocolBegin and protocolEnd
+	example: seat/ eol ...(info we want)... /seat eol
+*/
+int getInfoFromBuffer(){
+	//find the protocolBegin and the protocolEnd
+	int j;
+	int copyLen, moveLen;
+	char *pBegin, *pEnd;
+	int isFound = 0;
+	for(j=0; j<protocolNum; j++){
+		pBegin = strstr(totalBuf, protocolBegin[j]);
+		if(NULL == pBegin) continue;
+		pEnd = strstr(pBegin, protocolEnd[j]);
+		if(NULL != pEnd){// protocal found
+			copyLen = strlen(pBegin)-strlen(pEnd)-strlen(protocolBegin[j]);
+			memset(tmpInfo, '\0', BUFFER_LENGTH);
+			memcpy(tmpInfo, pBegin+strlen(protocolBegin[j]), copyLen);
+
+			moveLen = strlen(pEnd)-strlen(protocolEnd[j]);
+			memmove(totalBuf, pEnd+strlen(protocolEnd[j]), moveLen); //remove the info got from totalBuf
+			memset(totalBuf+moveLen, '\0', BUFFER_LENGTH-moveLen);
+			totalBufLen = moveLen;
+			isFound = 1;
+			handleInfo(j);
+			break;
+		}
+	}
+	if(NULL != (pBegin = strstr(totalBuf, "game-over \n"))){
+		return GAMEOVER;
+	}
+	return 1==isFound? PROTOCOL_FOUND: PROTOCOL_NOTFOUND;
+}
+
+/*
+	handle current info received from the server
+	@return: -1 game 
+*/
+int recvThread(char *info){
+	
+	return ;
+}
+
+
+
+int main (int argc, char *argv[]){
+	/*
+		receive 5 parameters
+	*/
+	serverIp = argv[1];
+	serverPort = atoi(argv[2]);
+	clientIp = argv[3];
+	clientPort = atoi(argv[4]); 
+	pid = atoi(argv[5]);
+	char pname[30];
+	sprintf(pname, "Whyjjc_%d", pid);
+		
+	int srd = (unsigned) time(NULL)+pid;
+	srand(srd);
+
+	int cnt;
+	pubInfo.handNum = 0;
+	char fname[30];
+	sprintf(fname, "log_%s.dat", clientIp);
+	file = fopen(fname, "a+");
+	
+	/*fprintf(file, "progName: %s\n", progName);
+	fprintf(file, "serverIp: %s\n", serverIp);
+	fprintf(file, "serverPort: %d\n", serverPort);
+	fprintf(file, "clientIp: %s\n", clientIp);
+	fprintf(file, "clientPort: %d\n", clientPort);
+	fprintf(file, "pid: %d\n", pid);
+	fprintf(file, "pname: %s\n", pname);*/
+	
+	/*
+		create socket
+	*/
+	
+	mySocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if(-1 == mySocket){
+		return 0;
+	}
+
+	/*
+		bind clientIp and clientPort to mySocket
+	*/
+	int reuse=1;
+	setsockopt(mySocket, SOL_SOCKET, SO_REUSEADDR, (const char*) &reuse, sizeof(reuse));
+	struct sockaddr_in client_addr;
+	bzero((char*)&client_addr, sizeof(client_addr));
+	client_addr.sin_addr.s_addr = inet_addr(clientIp);
+	client_addr.sin_family = AF_INET;
+	client_addr.sin_port = htons(clientPort);
+	int bindResult = bind(mySocket, (struct sockaddr*) &client_addr, sizeof(client_addr));
+	if(-1 == bindResult){
+		return 0;
+	}
+
+	/*
+		connect to server, if failed, retry
+	*/
+	struct sockaddr_in server_addr;
+	bzero((char*)&server_addr, sizeof(server_addr));
+	server_addr.sin_addr.s_addr = inet_addr(serverIp);
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_port = htons(serverPort);
+	struct sockaddr *srvAddr = (struct sockaddr*) &server_addr;
+	int cnntResult;
+	while(1){//if connect failed,retry
+		cnntResult = connect(mySocket, srvAddr, sizeof(server_addr));
+		if(cnntResult >= 0){
+			break;
+		}else{
+			usleep(10*1000); //sleep for 10ms
+		}
+	}
+	fprintf(file, "connect ok, time: %d\n", cnntResult);
+
+	/*
+		register pid and name to the server
+		text format as follows --- reg: pid pname eol
+	*/
+	ssize_t sendSize;
+	unsigned char msg[SEND_LENGTH];
+	memset(msg, '\0', SEND_LENGTH);
+	// !!!need notify
+	sprintf(msg, "reg: %d %s \n", pid, pname);
+	sendSize = send(mySocket, msg, strlen(msg)+1, 0);
+	fprintf(file, "reg ok : %s\n", msg);
+	
+	int nLength, code, nowLen;
+	while(1){
+		nLength = recv(mySocket, totalBuf+totalBufLen, RECV_LENGTH, 0); // recv 1 char for each time 
+		if(nLength > 0){
+			totalBufLen += nLength;
+			if(totalBufLen > CHECK_LENGTH){ // check if protocol occurs
+				totalBuf[totalBufLen] = '\0';
+				code = getInfoFromBuffer();
+				if(GAMEOVER == code){
+					fprintf(file, "---------\ngame over!\n");
+					break;
+				}
+			}
+			
+		}
+	}
+
+	/* release resource */
+	fclose(file);
+	close(mySocket);
+
+	return 0;
+} 
